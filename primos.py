@@ -1,14 +1,9 @@
-"""
-Módulo primos.py
-Implementação das funções de procura de números primos (sequencial e paralela).
-Ponto 3.1 do guião do trabalho prático.
-"""
-
 import time
-import multiprocessing as mp
+import multiprocessing
 
-
-# 3.1.1. "Função para verificação de primalidade"
+# =====================================================================
+# FUNÇÃO OBRIGATÓRIA (NÃO ALTERAR)
+# =====================================================================
 def is_prime(n: int) -> bool:
     if n < 2:
         return False
@@ -16,98 +11,113 @@ def is_prime(n: int) -> bool:
         return True
     if n % 2 == 0 or n % 3 == 0:
         return False
-
+    
     divisor = 5
     while divisor * divisor <= n:
         if n % divisor == 0 or n % (divisor + 2) == 0:
             return False
         divisor += 6
-
+        
     return True
 
 
-# 3.1.3. Funções a implementar - Versão Sequencial
+# =====================================================================
+# COMPONENTE SEQUENCIAL
+# =====================================================================
 def find_max_prime_sequential(timeout: int) -> int:
     """
-    Procura o maior número primo possível durante 'timeout' segundos,
-    usando ubordagem sequencial contínua
-    :param timeout: Limite temporal em segundos.
-    :return: O maior número primo encontrado.
+    Procura o maior número primo possível durante, no máximo, `timeout` segundos,
+    utilizando uma abordagem sequencial.
+    A pesquisa é contínua a partir do número 2 até o tempo acabar.
     """
-    start_time = time.time()
+    start_time = time.perf_counter()
     max_prime = -1
-    current_number = 2
+    current = 2
 
-    # Executa até que a diferença entre o tempo atual e o tempo inicial atinja o timeout
-    while (time.time() - start_time) < timeout:
-        if is_prime(current_number):
-            max_prime = current_number
-        current_number += 1
+    while True:
+        # Testar em blocos de 1000 para não sobrecarregar o CPU com 
+        # chamadas à função do relógio em todas as iterações
+        for _ in range(1000):
+            if is_prime(current):
+                max_prime = current
+            current += 1
+            
+        # Terminação por tempo
+        if time.perf_counter() - start_time >= timeout:
+            break
 
     return max_prime
 
 
-# Lógica Auxiliar para a Versão Paralela (O Worker)
-def _prime_worker(start_num: int, step: int, timeout: int, start_time: float, global_max: mp.Value, lock: mp.Lock):
+# =====================================================================
+# COMPONENTE PARALELA
+# =====================================================================
+def _parallel_worker(stop_event, global_counter, global_max, lock, chunk_size):
     """
-    Lógica executada por cada processo worker.
-    Utiliza uma estratégia de "Interleaving" (divisão intercalada) para garantir
-    que os processos não verificam os mesmos números.
+    Função executada por cada worker. Pede um intervalo de pesquisa, 
+    pesquisa do FIM para o INÍCIO desse intervalo, atualiza o maior
+    primo e salta para o próximo intervalo.
     """
-    current_number = start_num
-    local_max = -1
-
-    # O worker verifica os números atribuídos a ele até o tempo acabar
-    while (time.time() - start_time) < timeout:
-        if is_prime(current_number):
-            local_max = current_number
-        current_number += step  # Salta o número de workers para o próximo candidato
-
-    # Sincronização: Terminada a procura temporal, atualiza o resultado global partilhado.
-    # O uso do lock previne condições de corrida (race conditions) entre workers.
-    if local_max > -1:
+    while not stop_event.is_set():
+        # 1. Obter o próximo bloco de pesquisa de forma segura (Secção Crítica)
         with lock:
-            if local_max > global_max.value:
-                global_max.value = local_max
+            chunk_start = global_counter.value
+            global_counter.value += chunk_size
+            
+        chunk_end = chunk_start + chunk_size
+        
+        # 2. Pesquisar de TRÁS para a FRENTE (do maior para o menor)
+        # O primeiro primo que encontrarmos é obrigatoriamente o maior deste bloco
+        for n in range(chunk_end - 1, chunk_start - 1, -1):
+            
+            # Se o tempo acabar enquanto pesquisa, sai imediatamente
+            if stop_event.is_set():
+                break
+                
+            if is_prime(n):
+                # 3. Atualizar o valor máximo global (Secção Crítica)
+                with lock:
+                    if n > global_max.value:
+                        global_max.value = n
+                # Como encontramos o maior deste bloco, não precisamos de testar mais
+                # Quebramos o loop e vamos buscar o próximo bloco gigante
+                break
 
 
-
-# 3.1.3. Funções a implementar - Versão Paralela
 def find_max_prime_parallel(timeout: int, workers: int) -> int:
     """
-    Procura o maior número primo possível durante 'timeout' segundos,
-    recorrendo à execução paralela de múltiplos workers.
-
-    :param timeout: Limite temporal em segundos.
-    :param workers: Número de processos paralelos a criar.
-    :return: O maior número primo encontrado de entre todos os workers.
+    Procura o maior número primo em tempo limitado usando múltiplos processos.
+    Divide o espaço de procura em grandes fatias e procura em ordem decrescente
+    dentro de cada fatia para acelerar a descoberta de números gigantes.
     """
-    start_time = time.time()
-
-    # Estruturas de dados partilhadas com sincronização
-    # mp.Value('q', -1) cria um inteiro partilhado (long long) iniciado a -1
-    global_max = mp.Value('q', -1)
-    lock = mp.Lock()
-
+    # 'q' cria um inteiro de 64-bits com sinal, suporta números com ~18 algarismos
+    global_counter = multiprocessing.Value('q', 0)
+    global_max = multiprocessing.Value('q', -1)
+    
+    lock = multiprocessing.Lock()
+    stop_event = multiprocessing.Event()
+    
+    # Bloco de 200 milhões como falado no áudio
+    chunk_size = 200_000_000 
+    
     processes = []
-
-    # Criação e arranque dos workers
-    for i in range(workers):
-        """
-        Estratégia de divisão do espaço de procura:
-        Se workers = 4:
-        Worker 0: testa 2, 6, 10, 14...
-        Worker 1: testa 3, 7, 11, 15...
-        Worker 2: testa 4, 8, 12, 16...
-        """
-        start_num = 2 + i
-        step = workers
-
-        p = mp.Process(target=_prime_worker, args=(start_num, step, timeout, start_time, global_max, lock))
+    
+    # 1. Criar e iniciar os Workers
+    for _ in range(workers):
+        p = multiprocessing.Process(
+            target=_parallel_worker,
+            args=(stop_event, global_counter, global_max, lock, chunk_size)
+        )
         processes.append(p)
         p.start()
 
-    # Termina coordenada: o processo principal aguarda que todos os workers terminem
+    # 2. Coordenação e Terminação (bloqueia o programa principal durante 'timeout')
+    stop_event.wait(timeout)
+    
+    # 3. Sinalizar aos workers que o tempo acabou
+    stop_event.set()
+
+    # 4. Aguardar que todos terminem de forma limpa (Join)
     for p in processes:
         p.join()
 
@@ -115,26 +125,23 @@ def find_max_prime_parallel(timeout: int, workers: int) -> int:
 
 
 # =====================================================================
-# Testes
+# BLOCO PARA TESTE DIRETO NO TERMINAL
 # =====================================================================
-if __name__ == "__main__":
-    TEMPO_LIMITE = 3  # Testar 3 segundos
-    NUM_WORKERS = 5  # Quantidade de processos paralelos
-
-    print(f"A iniciar teste SEQUENCIAL ({TEMPO_LIMITE} segundos)...")
-    resultado_seq = find_max_prime_sequential(TEMPO_LIMITE)
-    print(f"Maior primo encontrado (Sequencial): {resultado_seq}")
-
-    print("-" * 40)
-
-    print(f"A iniciar teste PARALELO ({TEMPO_LIMITE} segundos com {NUM_WORKERS} workers)...")
-    resultado_par = find_max_prime_parallel(TEMPO_LIMITE, NUM_WORKERS)
-    print(f"Maior primo encontrado (Paralelo): {resultado_par}")
-
-    print("-" * 40)
-    print("Conclusão:")
-    if resultado_par > resultado_seq:
-        print("O método paralelo encontrou um número maior no mesmo tempo! (Sucesso)")
-    else:
-        print(
-            "O método sequencial foi igual ou melhor.") # pode acontecer em CPUs mais fracos ou com tempos muito curtos, isto faz diferença
+if __name__ == '__main__':
+    # Valores de teste (Exemplo: 5 segundos)
+    TEMPO_TESTE = 2
+    NUM_WORKERS = multiprocessing.cpu_count()
+    
+    print("-" * 50)
+    print(f"A iniciar pesquisa SEQUENCIAL (Contínua) por {TEMPO_TESTE}s...")
+    resultado_seq = find_max_prime_sequential(TEMPO_TESTE)
+    print(f"Resultado Sequencial: {resultado_seq}")
+    print(f"Algarismos: {len(str(resultado_seq))}")
+    print("-" * 50)
+    
+    print(f"A iniciar pesquisa PARALELA ({NUM_WORKERS} workers) por {TEMPO_TESTE}s...")
+    print("Usando fatias de 200M com pesquisa invertida...")
+    resultado_par = find_max_prime_parallel(TEMPO_TESTE, NUM_WORKERS)
+    print(f"Resultado Paralelo: {resultado_par}")
+    print(f"Algarismos: {len(str(resultado_par))}")
+    print("-" * 50)
