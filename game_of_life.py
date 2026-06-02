@@ -171,8 +171,8 @@ if __name__ == '__main__':
         [0, 0, 0, 0, 0]
     ]
 
-    GENERATION = 50
-    WORKERS = 2
+    GENERATION = 4
+    WORKERS = multiprocessing.cpu_count()
     
     # --- Teste Sequencial ---
     print("=== TESTE SEQUENCIAL (Imprimindo geração a geração) ===")
